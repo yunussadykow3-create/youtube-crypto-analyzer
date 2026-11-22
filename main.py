@@ -1,13 +1,15 @@
-
 import os
 import json
-import urllib.request
+import html
 import urllib.parse
+import urllib.request
 
 API_KEY = os.getenv("YOUTUBE_API_KEY")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-if not API_KEY:
-    raise ValueError("YouTube API anahtarı bulunamadı.")
+if not all([API_KEY, BOT_TOKEN, CHAT_ID]):
+    raise RuntimeError("GitHub Secrets eksik!")
 
 QUERIES = [
     ("crypto", "en"),
@@ -15,100 +17,138 @@ QUERIES = [
     ("криптовалюта", "ru"),
     ("Биткоин", "ru"),
     ("kripto para", "tr"),
-    ("Bitcoin analiz", "tr")
+    ("Bitcoin analiz", "tr"),
 ]
 
-videos = {}
-
-def api_request(endpoint, params):
-    params["key"] = API_KEY
-    url = (
-        "https://www.googleapis.com/youtube/v3/"
-        + endpoint + "?"
-        + urllib.parse.urlencode(params)
+def api_get(url):
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "YouTubeCryptoAnalyzer"}
     )
-    with urllib.request.urlopen(url) as response:
+    with urllib.request.urlopen(request, timeout=30) as response:
         return json.loads(response.read().decode("utf-8"))
 
-print("Kripto videolari araniyor...")
+def search_videos():
+    video_ids = set()
 
-for query, language in QUERIES:
-    page_token = None
+    for query, language in QUERIES:
+        for page in range(3):
+            params = {
+                "part": "snippet",
+                "q": query,
+                "type": "video",
+                "order": "viewCount",
+                "maxResults": 50,
+                "relevanceLanguage": language,
+                "key": API_KEY,
+            }
 
-    # Her arama için en fazla 3 sayfa
-    for page in range(3):
+            if page > 0:
+                break
+
+            url = (
+                "https://www.googleapis.com/youtube/v3/search?"
+                + urllib.parse.urlencode(params)
+            )
+            data = api_get(url)
+
+            for item in data.get("items", []):
+                video_id = item.get("id", {}).get("videoId")
+                if video_id:
+                    video_ids.add(video_id)
+
+    videos = []
+
+    ids = list(video_ids)
+    for start in range(0, len(ids), 50):
+        batch = ids[start:start + 50]
         params = {
-            "part": "snippet",
-            "q": query,
-            "type": "video",
-            "maxResults": 50,
-            "order": "viewCount",
-            "relevanceLanguage": language
+            "part": "snippet,statistics",
+            "id": ",".join(batch),
+            "key": API_KEY,
         }
+        url = (
+            "https://www.googleapis.com/youtube/v3/videos?"
+            + urllib.parse.urlencode(params)
+        )
+        data = api_get(url)
 
-        if page_token:
-            params["pageToken"] = page_token
+        for item in data.get("items", []):
+            stats = item.get("statistics", {})
+            snippet = item.get("snippet", {})
 
-        result = api_request("search", params)
-
-        ids = [
-            item["id"]["videoId"]
-            for item in result.get("items", [])
-        ]
-
-        for i in range(0, len(ids), 50):
-            stats = api_request("videos", {
-                "part": "snippet,statistics",
-                "id": ",".join(ids[i:i+50])
+            videos.append({
+                "id": item["id"],
+                "title": snippet.get("title", "Başlık yok"),
+                "channel": snippet.get("channelTitle", "Bilinmiyor"),
+                "views": int(stats.get("viewCount", 0)),
+                "likes": int(stats.get("likeCount", 0)),
             })
 
-            for video in stats.get("items", []):
-                video_id = video["id"]
-                snippet = video["snippet"]
-                statistics = video.get("statistics", {})
+    return videos
 
-                videos[video_id] = {
-                    "title": snippet["title"],
-                    "channel": snippet["channelTitle"],
-                    "views": int(statistics.get("viewCount", 0)),
-                    "likes": int(statistics.get("likeCount", 0)),
-                    "url": "https://www.youtube.com/watch?v=" + video_id
-                }
+def send_telegram(message):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": message,
+        "disable_web_page_preview": True,
+    }
 
-        page_token = result.get("nextPageToken")
-        if not page_token:
-            break
+    request = urllib.request.Request(
+        url,
+        data=urllib.parse.urlencode(payload).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
 
-print("\nEN COK IZLENEN 20 VIDEO\n")
+    with urllib.request.urlopen(request, timeout=30) as response:
+        result = json.loads(response.read().decode("utf-8"))
 
-top_views = sorted(
-    videos.values(),
-    key=lambda x: x["views"],
-    reverse=True
-)[:20]
+    if not result.get("ok"):
+        raise RuntimeError("Telegram mesajı gönderilemedi!")
 
-for video in top_views:
-    print(video["title"])
-    print("Kanal:", video["channel"])
-    print("Izlenme:", video["views"])
-    print("Begeni:", video["likes"])
-    print(video["url"])
-    print("--------------------")
+def make_message(title, videos):
+    lines = [title, ""]
 
-print("\nEN COK BEGENILEN 20 VIDEO\n")
+    for number, video in enumerate(videos, 1):
+        safe_title = html.escape(video["title"])
+        safe_channel = html.escape(video["channel"])
+        link = f"https://www.youtube.com/watch?v={video['id']}"
 
-top_likes = sorted(
-    videos.values(),
-    key=lambda x: x["likes"],
-    reverse=True
-)[:20]
+        lines.append(
+            f"{number}. {safe_title}\n"
+            f"📺 Kanal: {safe_channel}\n"
+            f"👁 Görüntülenme: {video['views']:,}\n"
+            f"👍 Beğeni: {video['likes']:,}\n"
+            f"🔗 {link}\n"
+        )
 
-for video in top_likes:
-    print(video["title"])
-    print("Kanal:", video["channel"])
-    print("Izlenme:", video["views"])
-    print("Begeni:", video["likes"])
-    print(video["url"])
-    print("--------------------")
+    return "\n".join(lines)
 
-print("\nToplam bulunan video:", len(videos))
+def main():
+    videos = search_videos()
+
+    if not videos:
+        send_telegram("YouTube Crypto Analyzer: Video bulunamadı.")
+        return
+
+    top_views = sorted(
+        videos, key=lambda x: x["views"], reverse=True
+    )[:20]
+
+    top_likes = sorted(
+        videos, key=lambda x: x["likes"], reverse=True
+    )[:20]
+
+    send_telegram(
+        make_message("🔥 EN ÇOK İZLENEN KRİPTO VİDEOLARI", top_views)
+    )
+
+    send_telegram(
+        make_message("👍 EN ÇOK BEĞENİLEN KRİPTO VİDEOLARI", top_likes)
+    )
+
+    print(f"Analiz tamamlandı. Bulunan video sayısı: {len(videos)}")
+
+if __name__ == "__main__":
+    main()
