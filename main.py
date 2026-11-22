@@ -6,6 +6,7 @@ import urllib.request
 
 from transcript_reader import get_transcript
 from learning_memory import save_learning
+from manual_learning import learn_from_files
 
 API_KEY = os.getenv("YOUTUBE_API_KEY")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
