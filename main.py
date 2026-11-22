@@ -107,6 +107,7 @@ def send_telegram(message):
         raise RuntimeError("Telegram mesajı gönderilemedi!")
 
 def main():
+    learn_from_files()
     videos = search_videos()
 
     if not videos:
